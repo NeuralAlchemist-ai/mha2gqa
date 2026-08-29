@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gqa-forge"
+version = "0.1.0"
+description = "Plug-and-play tool to convert MHA models to GQA with QLoRA recovery"
+readme = "README.md"
+license = { text = "MIT" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.10"
+dependencies = [
+    "torch>=2.0.0",
+    "transformers>=4.38.0",
+    "click>=8.0.0",
+    "datasets>=2.16.0",
+]
+
+[project.optional-dependencies]
+train = [
+    "peft>=0.9.0",
+    "bitsandbytes>=0.42.0",
+    "accelerate>=0.27.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "mypy",
+    "ruff",
+]
+
+[project.scripts]
+mha2gqa = "mha2gqa.cli:cli"
+
+[tool.setuptools.packages.find]
+where = ["src"]
