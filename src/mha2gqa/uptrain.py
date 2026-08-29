@@ -54,6 +54,8 @@ class GQAUptrain:
         self.can_quantize = BitsAndBytesConfig is not None and torch.cuda.is_available()
 
         if self.model_path is not None and self.model is None:
+            device_map = {"": 0} if torch.cuda.is_available() else None
+            
             if self.can_quantize:
                 bnb_config = BitsAndBytesConfig(
                     load_in_4bit=True,
@@ -63,11 +65,13 @@ class GQAUptrain:
                 )
                 logger.info(f"Loading and 4-bit quantizing GQA model from {self.model_path}...")
                 self.model = AutoModelForCausalLM.from_pretrained(
-                    self.model_path, quantization_config=bnb_config, device_map="auto"
+                    self.model_path, quantization_config=bnb_config, device_map=device_map
                 )
             else:
                 logger.info(f"Loading model without quantization from {self.model_path}...")
                 self.model = AutoModelForCausalLM.from_pretrained(self.model_path)
+                if torch.cuda.is_available():
+                    self.model = self.model.to("cuda:0")
 
         # Auto-detect target modules for LoRA if not explicitly configured.
         if not self.target_modules:
