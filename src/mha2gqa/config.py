@@ -14,17 +14,17 @@ class GQAUserConfig:
     save_path: str = "./gqa_model_output"
     
     # Настройки LoRA / QLoRA
-    lora_rank: int = 16
-    lora_alpha: int = 32
+    lora_rank: int = 64
+    lora_alpha: int = 64
     lora_dropout: float = 0.05
     lora_output_dir: str = "./gqa_lora_output"
     lora_target: list[str] = field(default_factory=list) # Сюда запишем auto-targets
     
     # Настройки обучения
-    batch_size: int = 2
-    accumulation_steps: int = 4
+    batch_size: int = 64
+    accumulation_steps: int = 1
     lr: float = 2e-4
-    epochs: int = 1
+    epochs: int = 3
     model_dtype: torch.dtype = torch.float16
 
     def __post_init__(self):
