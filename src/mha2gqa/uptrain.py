@@ -90,15 +90,23 @@ class GQAUptrain:
                     detected.add("v_proj")
                 if "o_proj" in key:
                     detected.add("o_proj")
+                if "gate_proj" in key:
+                    detected.add("gate_proj")
+                if "up_proj" in key:
+                    detected.add("up_proj")
+                if "down_proj" in key:
+                    detected.add("down_proj")
                 if "c_attn" in key:
                     detected.add("c_attn")
                 if "c_proj" in key:
                     detected.add("c_proj")
+                if "c_fc" in key:
+                    detected.add("c_fc")
 
             if {"q_proj", "k_proj", "v_proj"}.intersection(detected):
-                self.target_modules = [m for m in ("q_proj", "k_proj", "v_proj", "o_proj") if m in detected]
+                self.target_modules = [m for m in ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj") if m in detected]
             elif {"c_attn", "c_proj"}.intersection(detected):
-                self.target_modules = [m for m in ("c_attn", "c_proj") if m in detected]
+                self.target_modules = [m for m in ("c_attn", "c_proj", "c_fc") if m in detected]
             else:
                 self.target_modules = list(self.target_modules or [])
 
@@ -201,7 +209,7 @@ class GQAUptrain:
             max_steps=max_steps if max_steps is not None else -1,
             logging_steps=10,
             save_strategy="epoch",
-            gradient_checkpointing=True,
+            gradient_checkpointing=False,
             bf16=is_bf16,
             fp16=is_fp16,
             optim=optim,
@@ -247,6 +255,27 @@ class GQAUptrain:
         logger.info(estimate_uptraining_time(trainer, num_steps).summary())
 
         logger.info("Starting uptraining (accuracy recovery)...")
+
+        # --- Gradient flow check ---
+        logger.info("Running standalone gradient check...")
+        try:
+            self.peft_model.train()
+            train_dataloader = trainer.get_train_dataloader()
+            batch = next(iter(train_dataloader))
+            batch = {k: v.to(self.peft_model.device) for k, v in batch.items()}
+            outputs = self.peft_model(**batch)
+            loss = outputs.loss
+            loss.backward()
+            print("--- GRADIENT CHECK RESULTS ---")
+            for name, param in self.peft_model.named_parameters():
+                if param.requires_grad:
+                    print(name, param.grad.norm().item() if param.grad is not None else "NO GRAD")
+            print("------------------------------")
+            self.peft_model.zero_grad()
+        except Exception as e:
+            logger.warning(f"Gradient check failed: {e}")
+        # ---------------------------
+
         trainer.train()
 
         if self.eval_dataset is not None:
