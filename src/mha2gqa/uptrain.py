@@ -258,26 +258,6 @@ class GQAUptrain:
 
         logger.info("Starting uptraining (accuracy recovery)...")
 
-        # --- Gradient flow check ---
-        logger.info("Running standalone gradient check...")
-        try:
-            self.peft_model.train()
-            train_dataloader = trainer.get_train_dataloader()
-            batch = next(iter(train_dataloader))
-            batch = {k: v.to(self.peft_model.device) for k, v in batch.items()}
-            outputs = self.peft_model(**batch)
-            loss = outputs.loss
-            loss.backward()
-            print("--- GRADIENT CHECK RESULTS ---")
-            for name, param in self.peft_model.named_parameters():
-                if param.requires_grad:
-                    print(name, param.grad.norm().item() if param.grad is not None else "NO GRAD")
-            print("------------------------------")
-            self.peft_model.zero_grad()
-        except Exception as e:
-            logger.warning(f"Gradient check failed: {e}")
-        # ---------------------------
-
         trainer.train()
 
         if self.eval_dataset is not None:
