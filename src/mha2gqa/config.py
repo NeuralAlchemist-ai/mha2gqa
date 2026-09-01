@@ -21,11 +21,11 @@ class GQAUserConfig:
     lora_target: list[str] = field(default_factory=list) # Сюда запишем auto-targets
     
     # Настройки обучения
-    batch_size: int = 64
+    batch_size: int = 32
     accumulation_steps: int = 1
     lr: float = 2e-4
     epochs: int = 3
-    model_dtype: torch.dtype = torch.float16
+    model_dtype: torch.dtype = torch.bfloat16
 
     def __post_init__(self):
         if self.target_kv_groups <= 0:
