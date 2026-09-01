@@ -90,15 +90,23 @@ class GQAUptrain:
                     detected.add("v_proj")
                 if "o_proj" in key:
                     detected.add("o_proj")
+                if "gate_proj" in key:
+                    detected.add("gate_proj")
+                if "up_proj" in key:
+                    detected.add("up_proj")
+                if "down_proj" in key:
+                    detected.add("down_proj")
                 if "c_attn" in key:
                     detected.add("c_attn")
                 if "c_proj" in key:
                     detected.add("c_proj")
+                if "c_fc" in key:
+                    detected.add("c_fc")
 
             if {"q_proj", "k_proj", "v_proj"}.intersection(detected):
-                self.target_modules = [m for m in ("q_proj", "k_proj", "v_proj", "o_proj") if m in detected]
+                self.target_modules = [m for m in ("q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj") if m in detected]
             elif {"c_attn", "c_proj"}.intersection(detected):
-                self.target_modules = [m for m in ("c_attn", "c_proj") if m in detected]
+                self.target_modules = [m for m in ("c_attn", "c_proj", "c_fc") if m in detected]
             else:
                 self.target_modules = list(self.target_modules or [])
 
@@ -117,7 +125,7 @@ class GQAUptrain:
         # prepare_model_for_kbit_training is safe to call even without quantization,
         # but only strictly necessary when the model is actually k-bit loaded.
         if self.can_quantize:
-            self.model = prepare_model_for_kbit_training(self.model)
+            self.model = prepare_model_for_kbit_training(self.model, use_gradient_checkpointing=False)
 
         self.peft_model = get_peft_model(self.model, lora_config)
         self.peft_model.print_trainable_parameters()
@@ -179,7 +187,9 @@ class GQAUptrain:
 
     def train(self, max_steps=None):
         is_bf16 = self.model_dtype == torch.bfloat16
-        is_fp16 = self.model_dtype == torch.float16
+        # When 4-bit quantization is active with float16, disable PyTorch AMP GradScaler (fp16=False in Trainer)
+        # to prevent FP16 scaling overflow resulting in NaN gradients and zeroed parameter updates.
+        is_fp16 = self.model_dtype == torch.float16 and not getattr(self, "can_quantize", False)
         seq_len_for_estimation = 256
 
         from transformers import (
@@ -201,7 +211,7 @@ class GQAUptrain:
             max_steps=max_steps if max_steps is not None else -1,
             logging_steps=10,
             save_strategy="epoch",
-            gradient_checkpointing=True,
+            gradient_checkpointing=False,
             bf16=is_bf16,
             fp16=is_fp16,
             optim=optim,
@@ -247,6 +257,7 @@ class GQAUptrain:
         logger.info(estimate_uptraining_time(trainer, num_steps).summary())
 
         logger.info("Starting uptraining (accuracy recovery)...")
+
         trainer.train()
 
         if self.eval_dataset is not None:
