@@ -125,7 +125,7 @@ class GQAUptrain:
         # prepare_model_for_kbit_training is safe to call even without quantization,
         # but only strictly necessary when the model is actually k-bit loaded.
         if self.can_quantize:
-            self.model = prepare_model_for_kbit_training(self.model)
+            self.model = prepare_model_for_kbit_training(self.model, use_gradient_checkpointing=False)
 
         self.peft_model = get_peft_model(self.model, lora_config)
         self.peft_model.print_trainable_parameters()
@@ -187,7 +187,9 @@ class GQAUptrain:
 
     def train(self, max_steps=None):
         is_bf16 = self.model_dtype == torch.bfloat16
-        is_fp16 = self.model_dtype == torch.float16
+        # When 4-bit quantization is active with float16, disable PyTorch AMP GradScaler (fp16=False in Trainer)
+        # to prevent FP16 scaling overflow resulting in NaN gradients and zeroed parameter updates.
+        is_fp16 = self.model_dtype == torch.float16 and not getattr(self, "can_quantize", False)
         seq_len_for_estimation = 256
 
         from transformers import (
