@@ -43,11 +43,14 @@ class GQAConversionPipeline:
 
     def convert(self):
         """Load a source model, convert MHA -> GQA, save it. No training."""
+        import os
+        global_rank = int(os.environ.get("RANK", -1))
         model, hf_config, tokenizer = self._load_model()
         mapping = self._detect_architecture(model, hf_config)
         self._convert(model, hf_config, mapping)
-        # save tokenizer alongside the converted model so `uptrain` can reload it standalone
-        tokenizer.save_pretrained(self.config.save_path)
+        # save tokenizer alongside the converted model so `uptrain` can reload it standalone (rank 0 only)
+        if global_rank in (-1, 0):
+            tokenizer.save_pretrained(self.config.save_path)
         return self.config.save_path
 
     def uptrain(self, model_path: str = None, max_steps: int = None):
