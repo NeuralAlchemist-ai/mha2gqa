@@ -1,3 +1,5 @@
+import os
+
 import click
 import torch
 from rich.console import Console
@@ -6,6 +8,12 @@ from .config import GQAUserConfig
 from .pipeline import GQAConversionPipeline
 
 console = Console()
+global_rank = int(os.environ.get("RANK", -1))
+is_main_process = global_rank in (-1, 0)
+
+def print_main(*args, **kwargs):
+    if is_main_process:
+        console.print(*args, **kwargs)
 
 DTYPE_MAP = {
     "float16": torch.float16,
@@ -34,14 +42,14 @@ def convert(model_id, output_dir, kv_groups, dtype, allow_non_mha):
         model_dtype=DTYPE_MAP[dtype],
         allow_non_mha=allow_non_mha,
     )
-    console.print(f"Loading [bold]{model_id}[/bold]...")
+    print_main(f"Loading [bold]{model_id}[/bold]...")
     try:
         saved_path = GQAConversionPipeline(config).convert()
     except (NotImplementedError, ValueError) as e:
-        console.print(f"[red]Conversion failed:[/red] {e}")
+        print_main(f"[red]Conversion failed:[/red] {e}")
         raise click.Abort()
 
-    console.print(f":white_check_mark: Saved GQA model to [green]{saved_path}[/green]")
+    print_main(f":white_check_mark: Saved GQA model to [green]{saved_path}[/green]")
 
 
 @cli.command()
@@ -61,16 +69,16 @@ def uptrain(model_path, data_path, dataset_name, epochs, batch_size, max_steps, 
         batch_size=batch_size,
         lora_output_dir=lora_output,
     )
-    console.print(f"🔥 Starting QLoRA uptraining for [bold]{model_path}[/bold] on [bold]{data_path}[/bold]")
+    print_main(f"🔥 Starting QLoRA uptraining for [bold]{model_path}[/bold] on [bold]{data_path}[/bold]")
     try:
         ppl_pre, ppl_post = GQAConversionPipeline(config).uptrain(model_path=model_path, max_steps=max_steps)
     except Exception as e:
-        console.print(f"[red]Uptraining failed:[/red] {e}")
+        print_main(f"[red]Uptraining failed:[/red] {e}")
         raise click.Abort()
 
-    console.print(f":white_check_mark: LoRA weights saved to [green]{lora_output}[/green]")
+    print_main(f":white_check_mark: LoRA weights saved to [green]{lora_output}[/green]")
     if ppl_pre is not None and ppl_post is not None:
-        console.print(f"Perplexity: {ppl_pre:.2f} -> {ppl_post:.2f}")
+        print_main(f"Perplexity: {ppl_pre:.2f} -> {ppl_post:.2f}")
 
 
 @cli.command()
@@ -100,19 +108,19 @@ def run(model_id, output_dir, data_path, dataset_name, kv_groups, epochs,
         model_dtype=DTYPE_MAP[dtype],
         allow_non_mha=allow_non_mha,
     )
-    console.print(f"Running full pipeline for [bold]{model_id}[/bold]...")
+    print_main(f"Running full pipeline for [bold]{model_id}[/bold]...")
     try:
         ppl_pre, ppl_post = GQAConversionPipeline(config).run(max_steps=max_steps)
     except Exception as e:
-        console.print(f"[red]Pipeline failed:[/red] {e}")
+        print_main(f"[red]Pipeline failed:[/red] {e}")
         raise click.Abort()
 
-    console.print(
+    print_main(
         f":white_check_mark: Done. GQA model → [green]{output_dir}[/green], "
         f"LoRA weights → [green]{lora_output}[/green]"
     )
     if ppl_pre is not None and ppl_post is not None:
-        console.print(f"Perplexity: {ppl_pre:.2f} -> {ppl_post:.2f}")
+        print_main(f"Perplexity: {ppl_pre:.2f} -> {ppl_post:.2f}")
 
 
 if __name__ == "__main__":
