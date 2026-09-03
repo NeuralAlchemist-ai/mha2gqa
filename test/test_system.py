@@ -22,3 +22,4 @@ def test_full_pipeline():
     # Primary assertion: the pipeline produced real numbers, not nan/inf.
     assert ppl_pre is not None and ppl_post is not None
     assert math.isfinite(ppl_pre) and math.isfinite(ppl_post)
+    assert ppl_post < ppl_pre
