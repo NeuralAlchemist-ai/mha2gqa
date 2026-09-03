@@ -1,3 +1,4 @@
+import os
 import logging
 import math
 
@@ -25,6 +26,11 @@ class GQAUptrain:
         self.epochs = user_config.epochs
 
         self.model_dtype = getattr(user_config, "model_dtype", torch.float16)
+
+        # Detect DDP environment variables (set by torchrun / accelerate / Hugging Face Trainer)
+        self.local_rank = int(os.environ.get("LOCAL_RANK", -1))
+        self.global_rank = int(os.environ.get("RANK", -1))
+        self.is_main_process = self.global_rank in (-1, 0)
 
         # If a string is passed — it's a path/repo id to load via setup_qlora().
         # If an object is passed — it's an already-instantiated model.
@@ -54,8 +60,16 @@ class GQAUptrain:
         self.can_quantize = BitsAndBytesConfig is not None and torch.cuda.is_available()
 
         if self.model_path is not None and self.model is None:
-            device_map = {"": 0} if torch.cuda.is_available() else None
-            
+            if self.local_rank != -1:
+                device_target = f"cuda:{self.local_rank}"
+                device_map = {"": self.local_rank}
+            elif torch.cuda.is_available():
+                device_target = "cuda:0"
+                device_map = {"": 0}
+            else:
+                device_target = "cpu"
+                device_map = None
+
             if self.can_quantize:
                 bnb_config = BitsAndBytesConfig(
                     load_in_4bit=True,
@@ -63,15 +77,17 @@ class GQAUptrain:
                     bnb_4bit_compute_dtype=self.model_dtype,
                     bnb_4bit_use_double_quant=True,
                 )
-                logger.info(f"Loading and 4-bit quantizing GQA model from {self.model_path}...")
+                if self.is_main_process:
+                    logger.info(f"Loading and 4-bit quantizing GQA model from {self.model_path}...")
                 self.model = AutoModelForCausalLM.from_pretrained(
                     self.model_path, quantization_config=bnb_config, device_map=device_map
                 )
             else:
-                logger.info(f"Loading model without quantization from {self.model_path}...")
+                if self.is_main_process:
+                    logger.info(f"Loading model without quantization from {self.model_path}...")
                 self.model = AutoModelForCausalLM.from_pretrained(self.model_path)
                 if torch.cuda.is_available():
-                    self.model = self.model.to("cuda:0")
+                    self.model = self.model.to(device_target)
 
         # Auto-detect target modules for LoRA if not explicitly configured.
         if not self.target_modules:
@@ -128,12 +144,13 @@ class GQAUptrain:
             self.model = prepare_model_for_kbit_training(self.model, use_gradient_checkpointing=False)
 
         self.peft_model = get_peft_model(self.model, lora_config)
-        self.peft_model.print_trainable_parameters()
+        if self.is_main_process:
+            self.peft_model.print_trainable_parameters()
 
         return self.peft_model
 
     @staticmethod
-    def _calculate_perplexity(model, eval_dataset, max_length=256):
+    def _calculate_perplexity(model, eval_dataset, max_length=256, is_main_process=True):
         """
         Per-example perplexity over a tokenized HF `Dataset`.
 
@@ -150,10 +167,13 @@ class GQAUptrain:
             raise ValueError("eval_dataset is missing an 'input_ids' column")
 
         input_ids_list = eval_dataset["input_ids"]
-        logger.info(f"Evaluating perplexity on {len(input_ids_list)} examples...")
+        if is_main_process:
+            logger.info(f"Evaluating perplexity on {len(input_ids_list)} examples...")
+
+        disable_tqdm = not is_main_process
 
         with torch.no_grad():
-            for i in tqdm(range(len(input_ids_list)), desc="Evaluating perplexity"):
+            for i in tqdm(range(len(input_ids_list)), desc="Evaluating perplexity", disable=disable_tqdm):
                 input_ids = torch.tensor([input_ids_list[i]], device=model.device)
                 input_ids = input_ids[:, :max_length]
 
@@ -167,7 +187,8 @@ class GQAUptrain:
                 try:
                     outputs = model(input_ids, labels=target_ids)
                 except torch.cuda.OutOfMemoryError:
-                    torch.cuda.empty_cache()
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
                     continue
 
                 loss = outputs.loss
@@ -216,6 +237,7 @@ class GQAUptrain:
             fp16=is_fp16,
             optim=optim,
             report_to="none",
+            ddp_find_unused_parameters=False,
         )
 
         trainer = Trainer(
@@ -229,49 +251,63 @@ class GQAUptrain:
         ppl_post = None
 
         if self.eval_dataset is not None:
-            logger.info("Pre-Uptraining Perplexity Evaluation...")
+            if self.is_main_process:
+                logger.info("Pre-Uptraining Perplexity Evaluation...")
             try:
-                ppl_pre = self._calculate_perplexity(self.peft_model, self.eval_dataset, seq_len_for_estimation)
-                logger.info(f"Pre-Uptraining Perplexity: {ppl_pre:.2f}")
+                ppl_pre = self._calculate_perplexity(
+                    self.peft_model, self.eval_dataset, seq_len_for_estimation, is_main_process=self.is_main_process
+                )
+                if self.is_main_process:
+                    logger.info(f"Pre-Uptraining Perplexity: {ppl_pre:.2f}")
             except Exception as e:
-                logger.warning(f" Could not calculate pre-training perplexity: {e}")
+                if self.is_main_process:
+                    logger.warning(f" Could not calculate pre-training perplexity: {e}")
         else:
-            print(
-                "[info] No eval_dataset provided — skipping perplexity check. "
-                "Pass a raw-text held-out dataset (e.g. wikitext-2 test split) to measure quality."
+            if self.is_main_process:
+                print(
+                    "[info] No eval_dataset provided — skipping perplexity check. "
+                    "Pass a raw-text held-out dataset (e.g. wikitext-2 test split) to measure quality."
+                )
+
+        if self.is_main_process:
+            logger.info("Estimating VRAM usage and uptraining time...")
+            num_train_samples = len(self.dataset)
+            world_size = getattr(training_args, "world_size", 1) or 1
+            effective_batch_size = (
+                training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps * world_size
             )
+            steps_per_epoch = num_train_samples / effective_batch_size
+            num_steps = max_steps if max_steps is not None else int(steps_per_epoch * training_args.num_train_epochs)
 
-        logger.info("Estimating VRAM usage and uptraining time...")
-        num_train_samples = len(self.dataset)
-        steps_per_epoch = num_train_samples / (
-            training_args.per_device_train_batch_size * training_args.gradient_accumulation_steps
-        )
-        num_steps = max_steps if max_steps is not None else int(steps_per_epoch * training_args.num_train_epochs)
+            print(
+                estimate_vram(
+                    self.model, self.peft_model, training_args.per_device_train_batch_size,
+                    seq_len_for_estimation, compute_dtype=self.model_dtype,
+                ).summary()
+            )
+            logger.info(estimate_uptraining_time(trainer, num_steps).summary())
 
-        print(
-            estimate_vram(
-                self.model, self.peft_model, training_args.per_device_train_batch_size,
-                seq_len_for_estimation, compute_dtype=self.model_dtype,
-            ).summary()
-        )
-        logger.info(estimate_uptraining_time(trainer, num_steps).summary())
-
-        logger.info("Starting uptraining (accuracy recovery)...")
+            logger.info("Starting uptraining (accuracy recovery)...")
 
         trainer.train()
 
         if self.eval_dataset is not None:
             try:
-                ppl_post = self._calculate_perplexity(self.peft_model, self.eval_dataset, seq_len_for_estimation)
-                logger.info(f"Post-Uptraining Perplexity: {ppl_post:.2f}")
-                if ppl_pre is not None:
-                    print(
-                        f"Recovery: {ppl_pre:.2f} -> {ppl_post:.2f} "
-                        f"({'improved' if ppl_post < ppl_pre else 'did not improve'})"
-                    )
+                ppl_post = self._calculate_perplexity(
+                    self.peft_model, self.eval_dataset, seq_len_for_estimation, is_main_process=self.is_main_process
+                )
+                if self.is_main_process:
+                    logger.info(f"Post-Uptraining Perplexity: {ppl_post:.2f}")
+                    if ppl_pre is not None:
+                        print(
+                            f"Recovery: {ppl_pre:.2f} -> {ppl_post:.2f} "
+                            f"({'improved' if ppl_post < ppl_pre else 'did not improve'})"
+                        )
             except Exception as e:
-                logger.warning(f" Could not calculate post-training perplexity: {e}")
+                if self.is_main_process:
+                    logger.warning(f" Could not calculate post-training perplexity: {e}")
 
-        logger.info(f"Saving LoRA weights to {self.lora_output_dir}")
+        if self.is_main_process:
+            logger.info(f"Saving LoRA weights to {self.lora_output_dir}")
         trainer.save_model(self.lora_output_dir)
         return ppl_pre, ppl_post
