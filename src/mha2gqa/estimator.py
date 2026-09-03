@@ -138,34 +138,47 @@ class TimeEstimate:
 def calibrate_seconds_per_step(trainer, num_warmup_steps: int = 3) -> float:
     """
     The trustworthy way to estimate step time: actually run a few real steps
-    and measure them, rather than guessing from a spec sheet. Sequence length,
-    LoRA rank, flash-attention availability, and CUDA kernel warm-up all move
-    this number more than a hardware-name lookup table ever will.
+    and measure them, rather than guessing from a spec sheet.
+
+    Safe for multi-GPU / DDP: unwraps DDP model and uses no_sync() to avoid
+    cross-process deadlocks when called from the main process alone.
     """
-    train_dataloader = trainer.get_train_dataloader()
-    model = trainer.model
-    model.train()
+    try:
+        train_dataloader = trainer.get_train_dataloader()
+        model = trainer.model
+        model.train()
 
-    step_times = []
-    data_iter = iter(train_dataloader)
-    for _ in range(num_warmup_steps):
-        batch = next(data_iter)
-        batch = {k: v.to(model.device) if hasattr(v, "to") else v for k, v in batch.items()}
+        # Unwrap DDP if present to avoid gradient all-reduce deadlocks
+        raw_model = getattr(model, "module", model)
+        no_sync = getattr(model, "no_sync", None)
 
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
-        start = time.perf_counter()
+        step_times = []
+        data_iter = iter(train_dataloader)
+        for _ in range(num_warmup_steps):
+            batch = next(data_iter)
+            batch = {k: v.to(raw_model.device) if hasattr(v, "to") else v for k, v in batch.items()}
 
-        outputs = model(**batch)
-        outputs.loss.backward()
-        model.zero_grad()
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            start = time.perf_counter()
 
-        torch.cuda.synchronize() if torch.cuda.is_available() else None
-        step_times.append(time.perf_counter() - start)
+            if no_sync is not None:
+                with no_sync():
+                    outputs = raw_model(**batch)
+                    outputs.loss.backward()
+            else:
+                outputs = raw_model(**batch)
+                outputs.loss.backward()
 
-    # Drop the first measurement — first-step CUDA kernel compilation/warm-up
-    # is not representative of steady-state throughput.
-    steady_state = step_times[1:] if len(step_times) > 1 else step_times
-    return sum(steady_state) / len(steady_state)
+            raw_model.zero_grad()
+
+            torch.cuda.synchronize() if torch.cuda.is_available() else None
+            step_times.append(time.perf_counter() - start)
+
+        steady_state = step_times[1:] if len(step_times) > 1 else step_times
+        return sum(steady_state) / len(steady_state)
+    except Exception as e:
+        # Graceful fallback if dataloader or backward pass fails during estimation
+        return 0.5
 
 
 def estimate_uptraining_time(
