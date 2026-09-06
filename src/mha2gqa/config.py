@@ -26,6 +26,7 @@ class GQAUserConfig:
     lr: float = 2e-4
     epochs: int = 3
     model_dtype: torch.dtype = torch.bfloat16
+    seed: int = 42
 
     def __post_init__(self):
         if self.target_kv_groups <= 0:
