@@ -1,4 +1,3 @@
-from mha2gqa import model_loader
 import torch
 from .kmean import PyTorchKMeans
 
