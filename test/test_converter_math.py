@@ -13,6 +13,7 @@ def test_mha_to_gqa_converter_mean_pooling():
     converter.hidden_size = hidden_size
     converter.num_att_heads = num_heads
     converter.num_kv_groups = num_groups
+    converter.grouping = [torch.arange(num_heads)]
 
     result = converter.mha_to_gqa_converter(mha_weights)
     expected = torch.full((2, hidden_size), 2.0)  # mean of 1.0 and 3.0
