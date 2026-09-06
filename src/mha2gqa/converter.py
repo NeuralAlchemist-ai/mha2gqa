@@ -1,3 +1,4 @@
+import torch
 from transformers import AutoModelForCausalLM
 
 
@@ -7,7 +8,7 @@ def extract_lora_targets(config):
 
 
 class GQAConverter:
-    def __init__(self, model, model_config, user_config):
+    def __init__(self, model, model_config, user_config, grouping=None):
         self.state_dict = model.state_dict()
         self.num_att_heads = model_config.num_attention_heads
         
@@ -28,7 +29,7 @@ class GQAConverter:
         self.model_output_path = getattr(user_config, "model_save_path", None) or getattr(user_config, "save_path", "./gqa_model_output")
         self.model_dtype = model.dtype
         self.hidden_size = model_config.hidden_size
-
+        self.grouping = grouping
 
     def reconfig(self, model_weight_path):
         for layer_prefix, paths in model_weight_path.items():
@@ -48,29 +49,48 @@ class GQAConverter:
 
         return self.state_dict
 
-    def mha_to_gqa_converter(self, mha_weights):
+    def mha_to_gqa_converter(self, mha_weights, grouping=None):
+        grouping = grouping if grouping is not None else self.grouping
         source_kv_heads = getattr(self, "source_kv_heads", None) or self.num_att_heads
-        if source_kv_heads % self.num_kv_groups != 0:
-            raise ValueError(f"Source KV heads ({source_kv_heads}) must be divisible by target KV groups ({self.num_kv_groups})")
-
         head_dim = self.hidden_size // self.num_att_heads
-        heads_per_group = source_kv_heads // self.num_kv_groups
 
         mha_weights_splitted = mha_weights.reshape(source_kv_heads, head_dim, self.hidden_size)
-        preprocces_gqa_weights = mha_weights_splitted.reshape(self.num_kv_groups, heads_per_group, head_dim, self.hidden_size)
 
-        gqa_weights = preprocces_gqa_weights.mean(dim=1).reshape(-1, self.hidden_size)
+        if grouping is not None:
+            group_weights = []
+            for head_indices in grouping:
+                g_weight = mha_weights_splitted[head_indices].mean(dim=0)
+                group_weights.append(g_weight)
+            gqa_weights = torch.stack(group_weights, dim=0).reshape(-1, self.hidden_size)
+        else:
+            if source_kv_heads % self.num_kv_groups != 0:
+                raise ValueError(f"Source KV heads ({source_kv_heads}) must be divisible by target KV groups ({self.num_kv_groups})")
+            heads_per_group = source_kv_heads // self.num_kv_groups
+            preprocces_gqa_weights = mha_weights_splitted.reshape(self.num_kv_groups, heads_per_group, head_dim, self.hidden_size)
+            gqa_weights = preprocces_gqa_weights.mean(dim=1).reshape(-1, self.hidden_size)
+
         return gqa_weights.clone()
 
-    def mha_to_gqa_bias_converter(self, mha_bias):
+    def mha_to_gqa_bias_converter(self, mha_bias, grouping=None):
+        grouping = grouping if grouping is not None else self.grouping
         source_kv_heads = getattr(self, "source_kv_heads", None) or self.num_att_heads
         head_dim = self.hidden_size // self.num_att_heads
-        heads_per_group = source_kv_heads // self.num_kv_groups
 
         bias_splitted = mha_bias.reshape(source_kv_heads, head_dim)
-        bias_grouped = bias_splitted.reshape(self.num_kv_groups, heads_per_group, head_dim)
 
-        gqa_bias = bias_grouped.mean(dim=1).reshape(-1)
+        if grouping is not None:
+            group_biases = []
+            for head_indices in grouping:
+                g_bias = bias_splitted[head_indices].mean(dim=0)
+                group_biases.append(g_bias)
+            gqa_bias = torch.stack(group_biases, dim=0).reshape(-1)
+        else:
+            if source_kv_heads % self.num_kv_groups != 0:
+                raise ValueError(f"Source KV heads ({source_kv_heads}) must be divisible by target KV groups ({self.num_kv_groups})")
+            heads_per_group = source_kv_heads // self.num_kv_groups
+            bias_grouped = bias_splitted.reshape(self.num_kv_groups, heads_per_group, head_dim)
+            gqa_bias = bias_grouped.mean(dim=1).reshape(-1)
+
         return gqa_bias.clone()
 
     def save_gqa_model(self,config):
