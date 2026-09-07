@@ -12,13 +12,10 @@ class GQAConverter:
         self.state_dict = model.state_dict()
         self.num_att_heads = model_config.num_attention_heads
         
-        # 1. Берем РЕАЛЬНОЕ количество KV-голов из конфига модели. 
-        # Если параметра нет (как у старых моделей), значит это MHA и оно равно num_att_heads
+        # Real number of KV heads from model config (or default to num_att_heads for MHA)
         self.source_kv_heads = getattr(model_config, "num_key_value_heads", None) or self.num_att_heads
-        
         self.num_kv_groups = user_config.target_kv_groups
         
-        # 2. ИСПРАВЛЕНО: проверяем именно ИСХОДНУЮ модель (source_kv_heads), а не целевые группы
         if self.source_kv_heads != self.num_att_heads and not getattr(user_config, "allow_non_mha", False):
             raise ValueError(
                 f"Source model has num_key_value_heads={self.source_kv_heads} != "
@@ -29,28 +26,75 @@ class GQAConverter:
         self.model_output_path = getattr(user_config, "model_save_path", None) or getattr(user_config, "save_path", "./gqa_model_output")
         self.model_dtype = model.dtype
         self.hidden_size = model_config.hidden_size
+        self.head_dim = self.hidden_size // self.num_att_heads
         self.grouping = grouping
 
-    def reconfig(self, model_weight_path):
+    def _permutate_heads(self, weights, permutation, dim=0):
+        num_heads = len(permutation)
+        if dim == 0:
+            blocks = weights.view(num_heads, self.head_dim, -1)
+            return blocks[permutation].reshape(num_heads * self.head_dim, -1)
+        else:
+            blocks = weights.view(-1, num_heads, self.head_dim)
+            return blocks[:, permutation, :].reshape(-1, num_heads * self.head_dim)
+    
+    def _permute_bias(self, bias, permutation):
+        blocks = bias.view(len(permutation), self.head_dim)
+        return blocks[permutation].reshape(-1)
+
+    def reconfig(self, model_weight_path, permutation=None):
+        grouping = self.grouping
+
+        if permutation is not None and grouping is None:
+            if isinstance(permutation, (list, tuple, torch.Tensor)) and len(permutation) > 0:
+                first_elem = permutation[0]
+                if isinstance(first_elem, (list, tuple, torch.Tensor)) and len(first_elem) > 1:
+                    # 2D grouping passed as permutation
+                    grouping = permutation
+                    permutation = torch.cat([g if isinstance(g, torch.Tensor) else torch.tensor(g) for g in grouping]).flatten()
+                else:
+                    # 1D permutation passed: chunk it into target_kv_groups for K/V pooling
+                    perm_tensor = torch.tensor(permutation) if not isinstance(permutation, torch.Tensor) else permutation
+                    heads_per_group = self.num_att_heads // self.num_kv_groups
+                    grouping = [perm_tensor[i * heads_per_group : (i + 1) * heads_per_group] for i in range(self.num_kv_groups)]
+        elif grouping is not None and permutation is None:
+            permutation = torch.cat([g if isinstance(g, torch.Tensor) else torch.tensor(g) for g in grouping]).flatten()
+
         for layer_prefix, paths in model_weight_path.items():
             k_weights = self.state_dict[paths["k_weight"]]
-            self.state_dict[paths["k_weight"]] = self.mha_to_gqa_converter(k_weights)
+            self.state_dict[paths["k_weight"]] = self.mha_to_gqa_converter(k_weights, grouping=grouping)
 
             if "k_bias" in paths:
                 k_bias = self.state_dict[paths["k_bias"]]
-                self.state_dict[paths["k_bias"]] = self.mha_to_gqa_bias_converter(k_bias)
+                self.state_dict[paths["k_bias"]] = self.mha_to_gqa_bias_converter(k_bias, grouping=grouping)
 
             v_weights = self.state_dict[paths["v_weight"]]
-            self.state_dict[paths["v_weight"]] = self.mha_to_gqa_converter(v_weights)
+            self.state_dict[paths["v_weight"]] = self.mha_to_gqa_converter(v_weights, grouping=grouping)
 
             if "v_bias" in paths:
                 v_bias = self.state_dict[paths["v_bias"]]
-                self.state_dict[paths["v_bias"]] = self.mha_to_gqa_bias_converter(v_bias)
+                self.state_dict[paths["v_bias"]] = self.mha_to_gqa_bias_converter(v_bias, grouping=grouping)
+            
+            if permutation is not None:
+                if "q_weight" in paths and paths["q_weight"] in self.state_dict:
+                    self.state_dict[paths["q_weight"]] = self._permutate_heads(
+                        self.state_dict[paths["q_weight"]], permutation, dim=0
+                    )
+
+                if "q_bias" in paths and paths["q_bias"] in self.state_dict:
+                    self.state_dict[paths["q_bias"]] = self._permute_bias(
+                        self.state_dict[paths["q_bias"]], permutation
+                    )
+
+                if "o_weight" in paths and paths["o_weight"] in self.state_dict:
+                    self.state_dict[paths["o_weight"]] = self._permutate_heads(
+                        self.state_dict[paths["o_weight"]], permutation, dim=1
+                    )
 
         return self.state_dict
 
     def mha_to_gqa_converter(self, mha_weights, grouping=None):
-        grouping = grouping if grouping is not None else self.grouping
+        grouping = grouping if grouping is not None else getattr(self, "grouping", None)
         source_kv_heads = getattr(self, "source_kv_heads", None) or self.num_att_heads
         head_dim = self.hidden_size // self.num_att_heads
 
@@ -72,7 +116,7 @@ class GQAConverter:
         return gqa_weights.clone()
 
     def mha_to_gqa_bias_converter(self, mha_bias, grouping=None):
-        grouping = grouping if grouping is not None else self.grouping
+        grouping = grouping if grouping is not None else getattr(self, "grouping", None)
         source_kv_heads = getattr(self, "source_kv_heads", None) or self.num_att_heads
         head_dim = self.hidden_size // self.num_att_heads
 
@@ -93,7 +137,7 @@ class GQAConverter:
 
         return gqa_bias.clone()
 
-    def save_gqa_model(self,config):
+    def save_gqa_model(self, config):
         config.num_key_value_heads = int(self.num_kv_groups)
         # Instantiate model from config (avoid passing backend-specific kwargs)
         gqa_model = AutoModelForCausalLM.from_config(config)
@@ -119,4 +163,3 @@ class GQAConverter:
             pass
 
         gqa_model.save_pretrained(self.model_output_path)
-
