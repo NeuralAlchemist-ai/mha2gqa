@@ -3,53 +3,57 @@ from .kmean import PyTorchKMeans
 
 class Calibration:
     def __init__(self, model_config, user_config):
-        self.captured = {}
-        self.model = user_config.model_id
-        self.LAYER_IDX = 0
         self.num_kv_groups = user_config.target_kv_groups
         self.num_heads = getattr(model_config, "num_attention_heads", None) or getattr(model_config, "num_heads", None)
         self.head_dim = getattr(model_config, "head_dim", None) or (model_config.hidden_size // self.num_heads if self.num_heads else None)
 
-    def _build_head_permutation(self, clustered_heads):
-        return torch.cat([torch.tensor(group) for group in clustered_heads])
-
-    def capture_v_proj_output(self, module, inputs, output):
-        # output shape: [batch, seq_len, hidden_size]
-        self.captured["v_proj_out"] = output.detach()
-    
     def calibrate(self, model, calibration_texts):
-        handle = model.model.layers[self.LAYER_IDX].self_attn.v_proj.register_forward_hook(self.capture_v_proj_output)
+        num_layers = len(model.model.layers)
+        captured = {i: [] for i in range(num_layers)}
+        handles = []
 
-        all_head_vectors = []  # will collect [num_heads, head_dim] per example, then average
+        # Register forward hook on v_proj for EVERY layer
+        def make_hook(layer_idx):
+            def hook(module, inputs, output):
+                captured[layer_idx].append(output.detach())
+            return hook
 
-        with torch.no_grad():
-            for text in calibration_texts:
-                batch_inputs = {}
-                for k, v in text.items():
-                    if isinstance(v, torch.Tensor):
-                        tensor_v = v.to(model.device)
-                    else:
-                        tensor_v = torch.tensor(v, device=model.device)
-                    if tensor_v.ndim == 1:
-                        tensor_v = tensor_v.unsqueeze(0)
-                    batch_inputs[k] = tensor_v
+        for i in range(num_layers):
+            h = model.model.layers[i].self_attn.v_proj.register_forward_hook(make_hook(i))
+            handles.append(h)
+        try:
+            with torch.no_grad():
+                for text in calibration_texts:
+                    batch_inputs = {}
+                    for k, v in text.items():
+                        tensor_v = v.to(model.device) if isinstance(v, torch.Tensor) else torch.tensor(v, device=model.device)
+                        if tensor_v.ndim == 1:
+                            tensor_v = tensor_v.unsqueeze(0)
+                        batch_inputs[k] = tensor_v
+                    model(**batch_inputs)
+        finally:
+            for h in handles:
+                h.remove()
 
-                model(**batch_inputs)
-                v_out = self.captured["v_proj_out"]  # [batch, seq_len, hidden_size]
-                v_out = v_out.view(-1, self.num_heads, self.head_dim)  # [total_tokens, num_heads, head_dim]
-                all_head_vectors.append(v_out.mean(dim=0))  # mean over tokens -> [num_heads, head_dim]
+        per_layer_groupings = {}
+        for i in range(num_layers):
+            layer_v_outs = captured[i]
+            layer_head_vectors = []
+            for v_out in layer_v_outs:
+                v_out_reshaped = v_out.view(-1, self.num_heads, self.head_dim)
+                layer_head_vectors.append(v_out_reshaped.mean(dim=0))
+            
+            head_matrix = torch.stack(layer_head_vectors).mean(dim=0)  # [num_heads, head_dim]
+            grouping = PyTorchKMeans(n_clusters=self.num_kv_groups, max_iter=300, tol=1e-4).fit_predict(head_matrix)
+            
+            clustered_heads = [[] for _ in range(self.num_kv_groups)]
+            for head_id, cluster_id in enumerate(grouping):
+                clustered_heads[cluster_id].append(head_id)
+            
+            per_layer_groupings[i] = [torch.tensor(h_ids) for h_ids in clustered_heads]
 
-        handle.remove()
-
-        head_matrix = torch.stack(all_head_vectors).mean(dim=0)  # [num_heads, head_dim]
-
-        grouping = PyTorchKMeans(n_clusters=self.num_kv_groups, max_iter=300, tol=1e-4).fit_predict(head_matrix)
-        clustered_heads = [[] for _ in range(self.num_kv_groups)]
-        for head_id, cluster_id in enumerate(grouping):
-            clustered_heads[cluster_id].append(head_id)
-
-        clustered_heads_tensors = [torch.tensor(heads) for heads in clustered_heads]
-        return clustered_heads_tensors
+        return per_layer_groupings
 
     def calibrate_for_permutation(self, model, calibration_texts):
         return self.calibrate(model, calibration_texts)
+
