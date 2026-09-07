@@ -60,9 +60,9 @@ class GQAConversionPipeline:
         calib_samples = [train_data[i] for i in range(num_samples)]
         return self._calibrate(calib_samples, model, hf_config)
 
-    def _convert(self, model, hf_config, mapping, permutation):
+    def _convert(self, model, hf_config, mapping, per_layer_grouping):
         converter = GQAConverter(model, hf_config, self.config)
-        converter.reconfig(mapping, permutation)
+        converter.reconfig(mapping, per_layer_grouping=per_layer_grouping)
         converter.save_gqa_model(hf_config)
 
     def _uptrain(self, train_data, eval_data, tokenizer, model_or_path, max_steps=None):
@@ -76,8 +76,8 @@ class GQAConversionPipeline:
         global_rank = int(os.environ.get("RANK", -1))
         model, hf_config, tokenizer = self._load_model()
         mapping = self._detect_architecture(model, hf_config)
-        permutation = self._get_grouping_if_available(model, hf_config, tokenizer)
-        self._convert(model, hf_config, mapping, permutation)
+        per_layer_grouping = self._get_grouping_if_available(model, hf_config, tokenizer)
+        self._convert(model, hf_config, mapping, per_layer_grouping)
         # save tokenizer alongside the converted model so `uptrain` can reload it standalone (rank 0 only)
         if global_rank in (-1, 0):
             tokenizer.save_pretrained(self.config.save_path)
@@ -99,7 +99,7 @@ class GQAConversionPipeline:
         mapping = self._detect_architecture(model, hf_config)
         
         num_samples = min(32, len(train_data))
-        calib_samples = [train_data[i] for i in range(num_samples)]
-        permutation = self._calibrate(calib_samples, model, hf_config)
-        self._convert(model, hf_config, mapping, permutation)
+        calib_samples = [train_data[i] for i in range(num_samples)] if len(train_data) > 0 else []
+        per_layer_grouping = self._calibrate(calib_samples, model, hf_config) if calib_samples else None
+        self._convert(model, hf_config, mapping, per_layer_grouping)
         return self._uptrain(train_data, eval_data, tokenizer, model_or_path=self.config.save_path, max_steps=max_steps)
