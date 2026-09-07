@@ -49,23 +49,25 @@ class GQAConverter:
         return self.state_dict
 
     def mha_to_gqa_converter(self, mha_weights):
-        if self.source_kv_heads % self.num_kv_groups != 0:
-            raise ValueError(f"Source KV heads ({self.source_kv_heads}) must be divisible by target KV groups ({self.num_kv_groups})")
+        source_kv_heads = getattr(self, "source_kv_heads", None) or self.num_att_heads
+        if source_kv_heads % self.num_kv_groups != 0:
+            raise ValueError(f"Source KV heads ({source_kv_heads}) must be divisible by target KV groups ({self.num_kv_groups})")
 
         head_dim = self.hidden_size // self.num_att_heads
-        heads_per_group = self.source_kv_heads // self.num_kv_groups
+        heads_per_group = source_kv_heads // self.num_kv_groups
 
-        mha_weights_splitted = mha_weights.reshape(self.source_kv_heads, head_dim, self.hidden_size)
+        mha_weights_splitted = mha_weights.reshape(source_kv_heads, head_dim, self.hidden_size)
         preprocces_gqa_weights = mha_weights_splitted.reshape(self.num_kv_groups, heads_per_group, head_dim, self.hidden_size)
 
         gqa_weights = preprocces_gqa_weights.mean(dim=1).reshape(-1, self.hidden_size)
         return gqa_weights.clone()
 
     def mha_to_gqa_bias_converter(self, mha_bias):
+        source_kv_heads = getattr(self, "source_kv_heads", None) or self.num_att_heads
         head_dim = self.hidden_size // self.num_att_heads
-        heads_per_group = self.source_kv_heads // self.num_kv_groups
+        heads_per_group = source_kv_heads // self.num_kv_groups
 
-        bias_splitted = mha_bias.reshape(self.source_kv_heads, head_dim)
+        bias_splitted = mha_bias.reshape(source_kv_heads, head_dim)
         bias_grouped = bias_splitted.reshape(self.num_kv_groups, heads_per_group, head_dim)
 
         gqa_bias = bias_grouped.mean(dim=1).reshape(-1)
