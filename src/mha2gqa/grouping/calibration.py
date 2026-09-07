@@ -10,9 +10,11 @@ class Calibration:
         self.num_heads = getattr(model_config, "num_attention_heads", None) or getattr(model_config, "num_heads", None)
         self.head_dim = getattr(model_config, "head_dim", None) or (model_config.hidden_size // self.num_heads if self.num_heads else None)
 
+    def _build_head_permutation(self, clustered_heads):
+        return torch.cat([torch.tensor(group) for group in clustered_heads])
 
     def capture_v_proj_output(self, module, inputs, output):
-        # output shape: [batch, seq_len, hidden_size] -> reshape to per-head
+        # output shape: [batch, seq_len, hidden_size]
         self.captured["v_proj_out"] = output.detach()
     
     def calibrate(self, model, calibration_texts):
@@ -33,8 +35,8 @@ class Calibration:
                     batch_inputs[k] = tensor_v
 
                 model(**batch_inputs)
-                v_out = self.captured["v_proj_out"]  # [1, seq_len, hidden_size]
-                v_out = v_out.view(v_out.shape[1], self.num_heads, self.head_dim)  # [seq_len, num_heads, head_dim]
+                v_out = self.captured["v_proj_out"]  # [batch, seq_len, hidden_size]
+                v_out = v_out.view(-1, self.num_heads, self.head_dim)  # [total_tokens, num_heads, head_dim]
                 all_head_vectors.append(v_out.mean(dim=0))  # mean over tokens -> [num_heads, head_dim]
 
         handle.remove()
@@ -45,6 +47,9 @@ class Calibration:
         clustered_heads = [[] for _ in range(self.num_kv_groups)]
         for head_id, cluster_id in enumerate(grouping):
             clustered_heads[cluster_id].append(head_id)
-        clustered_heads_tensors = [torch.tensor(heads) for heads in clustered_heads]
 
+        clustered_heads_tensors = [torch.tensor(heads) for heads in clustered_heads]
         return clustered_heads_tensors
+
+    def calibrate_for_permutation(self, model, calibration_texts):
+        return self.calibrate(model, calibration_texts)
