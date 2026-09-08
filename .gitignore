@@ -220,3 +220,5 @@ __marimo__/
 # Output dirs
 gqa_recovery_lora
 
+#vscode
+.vscode/
