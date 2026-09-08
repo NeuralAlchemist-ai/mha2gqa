@@ -1,3 +1,5 @@
+from transformers.models import xlm_roberta_xl
+from asyncio import locks
 import os
 
 import click
@@ -62,8 +64,10 @@ def convert(model_id, output_dir, kv_groups, dtype, allow_non_mha, seed):
 @click.option("--batch-size", default=2, show_default=True)
 @click.option("--max-steps", default=None, type=int, help="Cap training steps (overrides --epochs if set)")
 @click.option("--lora-output", default="./gqa_lora_output", show_default=True)
+@click.option("--lora_rank", default=64, show_default=True)
+@click.option("--lora_alpha", default=64, show_default=True)
 @click.option("--seed", default=42, show_default=True, type=int, help="Global random seed")
-def uptrain(model_path, data_path, dataset_name, epochs, batch_size, max_steps, lora_output, seed):
+def uptrain(model_path, data_path, dataset_name, epochs, batch_size, max_steps, lora_output, lora_rank, lora_alpha, seed):
     """Run QLoRA uptraining on an existing (already-converted) model."""
     config = GQAUserConfig(
         data_path=data_path,
@@ -72,6 +76,8 @@ def uptrain(model_path, data_path, dataset_name, epochs, batch_size, max_steps, 
         batch_size=batch_size,
         lora_output_dir=lora_output,
         seed=seed,
+        lora_rank=lora_rank,
+        lora_alpha=lora_alpha
     )
     print_main(f"🔥 Starting QLoRA uptraining for [bold]{model_path}[/bold] on [bold]{data_path}[/bold]")
     try:
@@ -98,8 +104,11 @@ def uptrain(model_path, data_path, dataset_name, epochs, batch_size, max_steps, 
 @click.option("--dtype", default="float16", show_default=True, type=click.Choice(list(DTYPE_MAP)))
 @click.option("--allow-non-mha", is_flag=True, default=False)
 @click.option("--seed", default=42, show_default=True, type=int, help="Global random seed")
+@click.option("--lora_rank", default=64, show_default=True)
+@click.option("--lora_alpha", default=64, show_default=True)
+
 def run(model_id, output_dir, data_path, dataset_name, kv_groups, epochs,
-        batch_size, max_steps, lora_output, dtype, allow_non_mha, seed):
+        batch_size, max_steps, lora_output, dtype, allow_non_mha, seed, lora_rank, lora_alpha):
     """Full pipeline: convert MHA -> GQA and uptrain in one process."""
     config = GQAUserConfig(
         model_id=model_id,
@@ -113,6 +122,8 @@ def run(model_id, output_dir, data_path, dataset_name, kv_groups, epochs,
         model_dtype=DTYPE_MAP[dtype],
         allow_non_mha=allow_non_mha,
         seed=seed,
+        lora_rank=lora_rank,
+        lora_alpha=lora_alpha,
     )
     print_main(f"Running full pipeline for [bold]{model_id}[/bold]...")
     try:
