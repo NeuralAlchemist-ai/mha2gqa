@@ -93,8 +93,10 @@ def uptrain(model_path, data_path, dataset_name, epochs, batch_size, max_steps, 
 @click.option("--lora-output", default="./gqa_lora_output", show_default=True)
 @click.option("--dtype", default="float16", show_default=True, type=click.Choice(list(DTYPE_MAP)))
 @click.option("--allow-non-mha", is_flag=True, default=False)
+@click.option("--lora-rank", default=64, show_default=True)
+@click.option("--lora-alpha", default=64, show_default=True)
 def run(model_id, output_dir, data_path, dataset_name, kv_groups, epochs,
-        batch_size, max_steps, lora_output, dtype, allow_non_mha):
+        batch_size, max_steps, lora_output, dtype, allow_non_mha, lora_rank, lora_alpha):
     """Full pipeline: convert MHA -> GQA and uptrain in one process."""
     config = GQAUserConfig(
         model_id=model_id,
@@ -107,6 +109,8 @@ def run(model_id, output_dir, data_path, dataset_name, kv_groups, epochs,
         lora_output_dir=lora_output,
         model_dtype=DTYPE_MAP[dtype],
         allow_non_mha=allow_non_mha,
+        lora_rank=lora_rank,
+        lora_alpha=lora_alpha
     )
     print_main(f"Running full pipeline for [bold]{model_id}[/bold]...")
     try:
