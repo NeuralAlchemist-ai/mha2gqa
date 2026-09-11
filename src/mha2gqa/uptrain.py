@@ -208,9 +208,7 @@ class GQAUptrain:
 
     def train(self, max_steps=None):
         is_bf16 = self.model_dtype == torch.bfloat16
-        # When 4-bit quantization is active with float16, disable PyTorch AMP GradScaler (fp16=False in Trainer)
-        # to prevent FP16 scaling overflow resulting in NaN gradients and zeroed parameter updates.
-        is_fp16 = self.model_dtype == torch.float16 and not getattr(self, "can_quantize", False)
+        is_fp16 = self.model_dtype == torch.float16
         seq_len_for_estimation = 256
 
         from transformers import (
