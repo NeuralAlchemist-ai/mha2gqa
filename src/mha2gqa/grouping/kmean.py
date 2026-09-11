@@ -12,6 +12,7 @@ class PyTorchKMeans:
         self.tol = tol
         self.device = device
         self.cluster_centers_ = None
+        self.dt = torch.float32
 
     def fit(self, X):
         device = self.device if self.device is not None else X.device
@@ -36,7 +37,7 @@ class PyTorchKMeans:
             old_centers = self.cluster_centers_.clone()
 
             # 1. Calculate distances from each point to each centroid
-            distances = torch.cdist(X, self.cluster_centers_) # Shape (n_samples, n_clusters)
+            distances = torch.cdist(X.to(self.dt), self.cluster_centers_.to(self.dt)).to(self.dt)# Shape (n_samples, n_clusters)
 
             # 2. Perform balanced assignment
             # Flatten distances to get all (distance, point_idx, centroid_idx) triplets implicitly
@@ -81,10 +82,8 @@ class PyTorchKMeans:
                 if mask.any(): # Ensure the mask is not empty
                     new_centers[k] = X[mask].mean(dim=0)
                 else:
-                    # If a cluster is empty, keep its old centroid.
                     new_centers[k] = old_centers[k]
             
-            # Check for convergence
             center_shift = torch.sum((self.cluster_centers_ - new_centers) ** 2)
             self.cluster_centers_ = new_centers
 
@@ -101,13 +100,12 @@ class PyTorchKMeans:
         X = X.to(device)
         n_samples, _ = X.shape
 
-        # For prediction, we also enforce the same-size constraint
         base_cluster_size = n_samples // self.n_clusters
         remainder = n_samples % self.n_clusters
         target_cluster_capacities = torch.full((self.n_clusters,), base_cluster_size, dtype=torch.long, device=device)
         target_cluster_capacities[:remainder] += 1
 
-        distances = torch.cdist(X, self.cluster_centers_) # Shape (n_samples, n_clusters)
+        distances = torch.cdist(X.to(self.dt), self.cluster_centers_.to(self.dt)) # Shape (n_samples, n_clusters)
         
         flat_distances = distances.flatten() 
         point_indices = torch.arange(n_samples, device=device).unsqueeze(1).repeat(1, self.n_clusters).flatten()
