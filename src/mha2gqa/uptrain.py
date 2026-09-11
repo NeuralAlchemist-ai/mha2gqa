@@ -138,10 +138,8 @@ class GQAUptrain:
             task_type="CAUSAL_LM",
         )
 
-        # prepare_model_for_kbit_training is safe to call even without quantization,
-        # but only strictly necessary when the model is actually k-bit loaded.
         if self.can_quantize:
-            self.model = prepare_model_for_kbit_training(self.model, use_gradient_checkpointing=False)
+            self.model = prepare_model_for_kbit_training(self.model)
 
         self.peft_model = get_peft_model(self.model, lora_config)
         if self.is_main_process:
@@ -230,7 +228,7 @@ class GQAUptrain:
             max_steps=max_steps if max_steps is not None else -1,
             logging_steps=10,
             save_strategy="epoch",
-            gradient_checkpointing=False,
+            gradient_checkpointing=True,
             bf16=is_bf16,
             fp16=is_fp16,
             optim=optim,
