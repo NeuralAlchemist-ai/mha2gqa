@@ -106,9 +106,10 @@ def uptrain(model_path, data_path, dataset_name, epochs, batch_size, max_steps, 
 @click.option("--seed", default=42, show_default=True, type=int, help="Global random seed")
 @click.option("--lora_rank", default=64, show_default=True)
 @click.option("--lora_alpha", default=64, show_default=True)
+@click.option("--accumulation-steps", default=1, show_default=True)
 
 def run(model_id, output_dir, data_path, dataset_name, kv_groups, epochs,
-        batch_size, max_steps, lora_output, dtype, allow_non_mha, seed, lora_rank, lora_alpha):
+        batch_size, max_steps, lora_output, dtype, allow_non_mha, seed, lora_rank, lora_alpha, accumulation_steps):
     """Full pipeline: convert MHA -> GQA and uptrain in one process."""
     config = GQAUserConfig(
         model_id=model_id,
@@ -118,6 +119,7 @@ def run(model_id, output_dir, data_path, dataset_name, kv_groups, epochs,
         target_kv_groups=kv_groups,
         epochs=epochs,
         batch_size=batch_size,
+        accumulation_steps=accumulation_steps,
         lora_output_dir=lora_output,
         model_dtype=DTYPE_MAP[dtype],
         allow_non_mha=allow_non_mha,
