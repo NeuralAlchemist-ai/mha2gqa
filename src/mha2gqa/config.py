@@ -25,6 +25,7 @@ class GQAUserConfig:
     accumulation_steps: int = 1
     lr: float = 2e-4
     epochs: int = 3
+    early_stopping_patience: int = 3
     model_dtype: torch.dtype = torch.bfloat16
     seed: int = 42
 
