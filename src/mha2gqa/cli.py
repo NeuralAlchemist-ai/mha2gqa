@@ -1,3 +1,5 @@
+from transformers.models import xlm_roberta_xl
+from asyncio import locks
 import os
 
 import click
@@ -33,7 +35,8 @@ def cli():
 @click.option("--kv-groups", default=8, show_default=True, help="Target number of KV groups")
 @click.option("--dtype", default="float16", show_default=True, type=click.Choice(list(DTYPE_MAP)))
 @click.option("--allow-non-mha", is_flag=True, default=False, help="Proceed even if source already uses GQA/MQA")
-def convert(model_id, output_dir, kv_groups, dtype, allow_non_mha):
+@click.option("--seed", default=42, show_default=True, type=int, help="Global random seed")
+def convert(model_id, output_dir, kv_groups, dtype, allow_non_mha, seed):
     """Convert a MHA model to GQA and save it. Does not train."""
     config = GQAUserConfig(
         model_id=model_id,
@@ -41,6 +44,7 @@ def convert(model_id, output_dir, kv_groups, dtype, allow_non_mha):
         target_kv_groups=kv_groups,
         model_dtype=DTYPE_MAP[dtype],
         allow_non_mha=allow_non_mha,
+        seed=seed,
     )
     print_main(f"Loading [bold]{model_id}[/bold]...")
     try:
@@ -60,7 +64,10 @@ def convert(model_id, output_dir, kv_groups, dtype, allow_non_mha):
 @click.option("--batch-size", default=2, show_default=True)
 @click.option("--max-steps", default=None, type=int, help="Cap training steps (overrides --epochs if set)")
 @click.option("--lora-output", default="./gqa_lora_output", show_default=True)
-def uptrain(model_path, data_path, dataset_name, epochs, batch_size, max_steps, lora_output):
+@click.option("--lora_rank", default=64, show_default=True)
+@click.option("--lora_alpha", default=64, show_default=True)
+@click.option("--seed", default=42, show_default=True, type=int, help="Global random seed")
+def uptrain(model_path, data_path, dataset_name, epochs, batch_size, max_steps, lora_output, lora_rank, lora_alpha, seed):
     """Run QLoRA uptraining on an existing (already-converted) model."""
     config = GQAUserConfig(
         data_path=data_path,
@@ -68,6 +75,9 @@ def uptrain(model_path, data_path, dataset_name, epochs, batch_size, max_steps, 
         epochs=epochs,
         batch_size=batch_size,
         lora_output_dir=lora_output,
+        seed=seed,
+        lora_rank=lora_rank,
+        lora_alpha=lora_alpha
     )
     print_main(f"🔥 Starting QLoRA uptraining for [bold]{model_path}[/bold] on [bold]{data_path}[/bold]")
     try:
@@ -93,10 +103,13 @@ def uptrain(model_path, data_path, dataset_name, epochs, batch_size, max_steps, 
 @click.option("--lora-output", default="./gqa_lora_output", show_default=True)
 @click.option("--dtype", default="float16", show_default=True, type=click.Choice(list(DTYPE_MAP)))
 @click.option("--allow-non-mha", is_flag=True, default=False)
-@click.option("--lora-rank", default=64, show_default=True)
-@click.option("--lora-alpha", default=64, show_default=True)
+@click.option("--seed", default=42, show_default=True, type=int, help="Global random seed")
+@click.option("--lora_rank", default=64, show_default=True)
+@click.option("--lora_alpha", default=64, show_default=True)
+@click.option("--accumulation-steps", default=1, show_default=True)
+
 def run(model_id, output_dir, data_path, dataset_name, kv_groups, epochs,
-        batch_size, max_steps, lora_output, dtype, allow_non_mha, lora_rank, lora_alpha):
+        batch_size, max_steps, lora_output, dtype, allow_non_mha, seed, lora_rank, lora_alpha, accumulation_steps):
     """Full pipeline: convert MHA -> GQA and uptrain in one process."""
     config = GQAUserConfig(
         model_id=model_id,
@@ -106,11 +119,13 @@ def run(model_id, output_dir, data_path, dataset_name, kv_groups, epochs,
         target_kv_groups=kv_groups,
         epochs=epochs,
         batch_size=batch_size,
+        accumulation_steps=accumulation_steps,
         lora_output_dir=lora_output,
         model_dtype=DTYPE_MAP[dtype],
         allow_non_mha=allow_non_mha,
+        seed=seed,
         lora_rank=lora_rank,
-        lora_alpha=lora_alpha
+        lora_alpha=lora_alpha,
     )
     print_main(f"Running full pipeline for [bold]{model_id}[/bold]...")
     try:

@@ -4,6 +4,7 @@ import math
 
 import torch
 from tqdm import tqdm
+from transformers import EarlyStoppingCallback
 
 from .estimator import estimate_uptraining_time, estimate_vram
 
@@ -31,6 +32,8 @@ class GQAUptrain:
         self.local_rank = int(os.environ.get("LOCAL_RANK", -1))
         self.global_rank = int(os.environ.get("RANK", -1))
         self.is_main_process = self.global_rank in (-1, 0)
+
+        self.early_stopping_patience = user_config.early_stopping_patience
 
         # If a string is passed — it's a path/repo id to load via setup_qlora().
         # If an object is passed — it's an already-instantiated model.
@@ -138,10 +141,8 @@ class GQAUptrain:
             task_type="CAUSAL_LM",
         )
 
-        # prepare_model_for_kbit_training is safe to call even without quantization,
-        # but only strictly necessary when the model is actually k-bit loaded.
         if self.can_quantize:
-            self.model = prepare_model_for_kbit_training(self.model, use_gradient_checkpointing=False)
+            self.model = prepare_model_for_kbit_training(self.model)
 
         self.peft_model = get_peft_model(self.model, lora_config)
         if self.is_main_process:
@@ -207,10 +208,10 @@ class GQAUptrain:
         return math.exp(avg_nll)
 
     def train(self, max_steps=None):
-        is_bf16 = self.model_dtype == torch.bfloat16
-        # When 4-bit quantization is active with float16, disable PyTorch AMP GradScaler (fp16=False in Trainer)
-        # to prevent FP16 scaling overflow resulting in NaN gradients and zeroed parameter updates.
-        is_fp16 = self.model_dtype == torch.float16 and not getattr(self, "can_quantize", False)
+        is_cuda = torch.cuda.is_available()
+        is_bf16 = self.model_dtype == torch.bfloat16 and is_cuda and torch.cuda.is_bf16_supported()
+        is_fp16 = self.model_dtype == torch.float16 and is_cuda
+        use_cpu = not is_cuda
         seq_len_for_estimation = 256
 
         from transformers import (
@@ -222,6 +223,15 @@ class GQAUptrain:
         # paged_adamw_8bit needs bitsandbytes' CUDA kernels; fall back to a
         # plain optimizer on CPU (e.g. CI) or when quantization isn't active.
         optim = "paged_adamw_8bit" if getattr(self, "can_quantize", False) else "adamw_torch"
+        
+        total_steps = max_steps if max_steps is not None else int(len(self.dataset) * self.epochs / (self.batch_size * self.accumulation_steps))
+        dynamic_eval_steps = max(10, total_steps // 10)
+
+        has_eval = self.eval_dataset is not None
+        eval_strategy = "steps" if has_eval else "no"
+        callbacks = [
+            EarlyStoppingCallback(early_stopping_patience=self.early_stopping_patience),
+        ] if has_eval else []
 
         training_args = TrainingArguments(
             output_dir=self.lora_output_dir,
@@ -231,10 +241,18 @@ class GQAUptrain:
             num_train_epochs=self.epochs,
             max_steps=max_steps if max_steps is not None else -1,
             logging_steps=10,
-            save_strategy="epoch",
-            gradient_checkpointing=False,
+            save_strategy="steps",
+            save_steps=dynamic_eval_steps,
+            eval_strategy=eval_strategy,
+            eval_steps=dynamic_eval_steps if has_eval else None,
+            load_best_model_at_end=has_eval,
+            metric_for_best_model="eval_loss" if has_eval else None,
+            greater_is_better=False if has_eval else None,
+            gradient_checkpointing=True,
+            gradient_checkpointing_kwargs={"use_reentrant": False},
             bf16=is_bf16,
             fp16=is_fp16,
+            use_cpu=use_cpu,
             optim=optim,
             report_to="none",
             ddp_find_unused_parameters=False,
@@ -243,8 +261,10 @@ class GQAUptrain:
         trainer = Trainer(
             model=self.peft_model,
             train_dataset=self.dataset,
+            eval_dataset=self.eval_dataset if has_eval else None,
             args=training_args,
             data_collator=DataCollatorForLanguageModeling(self.tokenizer, mlm=False),
+            callbacks=callbacks,
         )
 
         ppl_pre = None

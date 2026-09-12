@@ -27,10 +27,21 @@ class AutoArchitectureDetector:
             current_layer_path = {}
             layer_info = mapping_template[i]
             
-            k_w_key = layer_info['k_weight']
-            v_w_key = layer_info['v_weight']
-            k_b_key = layer_info['k_bias']
-            v_b_key = layer_info['v_bias']
+            k_w_key = layer_info.get('k_weight')
+            v_w_key = layer_info.get('v_weight')
+            k_b_key = layer_info.get('k_bias')
+            v_b_key = layer_info.get('v_bias')
+            o_w_key = layer_info.get('o_weight')
+            q_w_key = layer_info.get('q_weight')
+            q_b_key = layer_info.get('q_bias')
+
+            if o_w_key and o_w_key in self.state_dict:
+                current_layer_path["o_weight"] = o_w_key
+            
+            if q_w_key and q_w_key in self.state_dict:
+                current_layer_path["q_weight"] = q_w_key
+                if q_b_key and q_b_key in self.state_dict:
+                    current_layer_path["q_bias"] = q_b_key
 
             if k_w_key in self.state_dict:
                 current_layer_path["k_weight"] = k_w_key
